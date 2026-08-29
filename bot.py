@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
+import threading
 import time
 
 import requests
+from flask import Flask, abort, request
 
 from ai_service import AIService
 from config import load_settings
@@ -242,19 +246,57 @@ class TelegramBot:
         )
         for update in updates or []:
             self.offset = max(self.offset, int(update["update_id"]) + 1)
-            message = update.get("message") or {}
-            chat = message.get("chat") or {}
-            sender = message.get("from") or {}
-            if chat.get("type") != "private" or "text" not in message:
-                continue
-            try:
-                self.handle(int(sender["id"]), str(message["text"]))
-            except Exception:
-                logger.exception("Message handling failed")
+            self.process_update(update)
+
+    def process_update(self, update: dict) -> None:
+        message = update.get("message") or {}
+        chat = message.get("chat") or {}
+        sender = message.get("from") or {}
+        if chat.get("type") != "private" or "text" not in message:
+            return
+        try:
+            self.handle(int(sender["id"]), str(message["text"]))
+        except Exception:
+            logger.exception("Message handling failed")
+
+    def run_webhook(self, base_url: str) -> None:
+        app = Flask(__name__)
+        secret = hashlib.sha256(
+            self.settings.telegram_bot_token.encode("utf-8")
+        ).hexdigest()
+
+        @app.get("/")
+        def health():
+            return {"status": "ok", "bot": "TurkceMateryallerAIBot"}
+
+        @app.post("/telegram-webhook")
+        def telegram_webhook():
+            if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+                abort(403)
+            update = request.get_json(silent=True) or {}
+            threading.Thread(
+                target=self.process_update, args=(update,), daemon=True
+            ).start()
+            return {"ok": True}
+
+        webhook_url = f"{base_url.rstrip('/')}/telegram-webhook"
+        self.call(
+            "setWebhook",
+            url=webhook_url,
+            secret_token=secret,
+            allowed_updates=["message"],
+            drop_pending_updates=True,
+        )
+        logger.info("Telegram webhook configured: %s", webhook_url)
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
 
     def run(self) -> None:
         identity = self.call("getMe")
         logger.info("Telegram bot started: @%s", identity.get("username", "unknown"))
+        webhook_base_url = os.getenv("WEBHOOK_BASE_URL", "").strip()
+        if webhook_base_url:
+            self.run_webhook(webhook_base_url)
+            return
         while True:
             try:
                 self.poll_once()
