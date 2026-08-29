@@ -27,6 +27,6 @@ def load_settings() -> Settings:
         telegram_bot_token=token,
         admin_telegram_id=int(admin) if admin else None,
         gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         database_path=os.getenv("DATABASE_PATH", "data/bot.db"),
     )
