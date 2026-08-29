@@ -20,7 +20,9 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    token = (os.getenv("VK_GROUP_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
+    # BotHost always injects its required token field as BOT_TOKEN. Prefer it
+    # over a possibly stale VK_GROUP_TOKEN left from an earlier deployment.
+    token = (os.getenv("BOT_TOKEN") or os.getenv("VK_GROUP_TOKEN") or "").strip()
     admin_id = os.getenv("ADMIN_VK_ID", "").strip()
     if not token:
         raise RuntimeError("VK_GROUP_TOKEN or BOT_TOKEN is not configured")
