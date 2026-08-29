@@ -14,8 +14,8 @@ class Settings:
     vk_group_token: str
     vk_group_id: int
     admin_vk_id: int
-    openai_api_key: str | None
-    openai_model: str
+    gemini_api_key: str | None
+    gemini_model: str
     database_path: str
 
 
@@ -33,7 +33,7 @@ def load_settings() -> Settings:
         vk_group_token=token,
         vk_group_id=int(os.getenv("VK_GROUP_ID", "240417579")),
         admin_vk_id=int(admin_id),
-        openai_api_key=os.getenv("OPENAI_API_KEY") or None,
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+        gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
         database_path=os.getenv("DATABASE_PATH", "data/bot.db"),
     )
