@@ -52,15 +52,19 @@ class AIService:
 
         def priority(name: str) -> tuple[int, str]:
             lowered = name.lower()
-            if "flash-lite" in lowered and "preview" not in lowered:
+            if "gemini-3.5-flash-lite" in lowered and "preview" not in lowered:
                 return (0, name)
-            if "flash" in lowered and "preview" not in lowered:
+            if "gemini-3.5-flash" in lowered and "preview" not in lowered:
                 return (1, name)
-            if "flash-lite" in lowered:
+            if "flash-lite" in lowered and "preview" not in lowered:
                 return (2, name)
-            if "flash" in lowered:
+            if "flash" in lowered and "preview" not in lowered:
                 return (3, name)
-            return (4, name)
+            if "flash-lite" in lowered:
+                return (4, name)
+            if "flash" in lowered:
+                return (5, name)
+            return (6, name)
 
         return sorted(set(models), key=priority)
 
