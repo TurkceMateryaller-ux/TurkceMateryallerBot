@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import logging
-import random
+import time
 
-import vk_api
-from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
+import requests
 
 from ai_service import AIService
 from config import load_settings
@@ -16,156 +15,119 @@ from keyboards import (
     subscription_keyboard,
 )
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-logger = logging.getLogger("turkce_bot")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("turkce_telegram_bot")
 
 
-class TurkceBot:
+class TelegramBot:
     def __init__(self) -> None:
         self.settings = load_settings()
-        self.session = vk_api.VkApi(token=self.settings.vk_group_token)
-        self.api = self.session.get_api()
-        self._log_vk_token_diagnostics()
-        self.longpoll = VkBotLongPoll(self.session, self.settings.vk_group_id)
+        self.base_url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}"
+        self.http = requests.Session()
         self.db = Database(self.settings.database_path)
         self.db.initialize()
         self.ai = AIService(self.settings.gemini_api_key, self.settings.gemini_model)
         self.states: dict[int, str] = {}
-        self.request_interviews: dict[int, dict] = {}
+        self.interviews: dict[int, dict] = {}
+        self.offset = 0
 
-    def _log_vk_token_diagnostics(self) -> None:
-        """Log non-secret token metadata before opening Long Poll."""
-        try:
-            result = self.api.groups.getTokenPermissions()
-            permissions = [
-                item.get("name", "unknown")
-                for item in result.get("permissions", [])
-                if isinstance(item, dict)
-            ]
-            logger.info("VK token permissions: %s", ", ".join(permissions) or "none")
-        except Exception:
-            logger.exception("Could not inspect VK token permissions")
+    def call(self, method: str, **payload):
+        response = self.http.post(f"{self.base_url}/{method}", json=payload, timeout=40)
+        if not response.ok:
+            raise RuntimeError(
+                f"Telegram {method} failed ({response.status_code}): {response.text[:500]}"
+            )
+        data = response.json()
+        if not data.get("ok"):
+            raise RuntimeError(f"Telegram {method} returned an error: {data}")
+        return data.get("result")
 
-        try:
-            groups = self.api.groups.getById(group_id=self.settings.vk_group_id)
-            resolved = groups.get("groups", groups) if isinstance(groups, dict) else groups
-            logger.info("VK token group check: configured=%s resolved=%s", self.settings.vk_group_id, resolved)
-        except Exception:
-            logger.exception("Could not verify VK group for token")
+    def is_admin(self, user_id: int) -> bool:
+        return self.settings.admin_telegram_id == user_id
 
-    def send(self, user_id: int, text: str, keyboard=None, attachment: str | None = None) -> None:
-        params = {
-            "user_id": user_id,
-            "message": text,
-            "random_id": random.randint(1, 2_147_483_647),
-        }
-        if keyboard:
-            params["keyboard"] = keyboard.get_keyboard()
-        if attachment:
-            params["attachment"] = attachment
-        self.api.messages.send(**params)
+    def send(self, chat_id: int, text: str, keyboard: dict | None = None) -> None:
+        text = str(text)
+        chunks = [text[i : i + 4000] for i in range(0, len(text), 4000)] or [""]
+        for index, chunk in enumerate(chunks):
+            payload = {"chat_id": chat_id, "text": chunk}
+            if keyboard is not None and index == len(chunks) - 1:
+                payload["reply_markup"] = keyboard
+            self.call("sendMessage", **payload)
 
     def show_menu(self, user_id: int) -> None:
         self.states.pop(user_id, None)
-        self.request_interviews.pop(user_id, None)
-        self.send(
-            user_id,
-            "Выберите нужный раздел:",
-            main_keyboard(user_id == self.settings.admin_vk_id),
-        )
+        self.interviews.pop(user_id, None)
+        self.send(user_id, "Выберите нужный раздел:", main_keyboard(self.is_admin(user_id)))
 
-    def handle_message(self, user_id: int, text: str) -> None:
+    def handle(self, user_id: int, text: str) -> None:
         normalized = text.strip().lower()
         self.db.ensure_user(user_id)
-
-        if normalized in {"начать", "старт", "в главное меню", "меню"}:
+        if normalized in {"/start", "начать", "старт", "меню", "в главное меню"}:
             self.show_menu(user_id)
             return
 
         state = self.states.get(user_id)
         if state == "request_interview":
-            self.continue_request_interview(user_id, text)
+            self.continue_interview(user_id, text)
             return
         if state == "request_confirmation":
-            if normalized == "подтвердить заявку":
-                interview = self.request_interviews.pop(user_id)
-                request_id = self.db.add_request(user_id, interview["summary"])
-                self.states.pop(user_id, None)
-                self.send(
-                    user_id,
-                    f"Заявка №{request_id} принята. Я сообщу, когда её статус изменится.",
-                    main_keyboard(user_id == self.settings.admin_vk_id),
-                )
-            elif normalized == "изменить заявку":
-                self.states[user_id] = "request_interview"
-                self.send(
-                    user_id,
-                    "Напишите, что нужно изменить или добавить. ИИ обновит итог заявки.",
-                    back_keyboard(),
-                )
-            elif normalized == "отменить заявку":
-                self.request_interviews.pop(user_id, None)
-                self.show_menu(user_id)
-            else:
-                self.send(user_id, "Выберите: подтвердить, изменить или отменить заявку.", request_confirmation_keyboard())
+            self.confirm_request(user_id, normalized)
             return
         if state in {"ai_task", "ai_lesson"}:
             kind = "упражнение с ответами" if state == "ai_task" else "план урока"
             self.send(user_id, "Готовлю результат…")
             try:
-                result = self.ai.generate(text, kind)
+                answer = self.ai.generate(text, kind)
             except Exception:
                 logger.exception("AI request failed")
-                result = "Не удалось получить ответ ИИ. Попробуйте ещё раз позднее."
+                answer = "Не удалось получить ответ ИИ. Попробуйте ещё раз позднее."
             self.states.pop(user_id, None)
-            self.send(user_id, result, main_keyboard(user_id == self.settings.admin_vk_id))
+            self.send(user_id, answer, main_keyboard(self.is_admin(user_id)))
             return
 
-        commands = {
-            "найти материал": self.handle_materials,
-            "заказать материал": self.handle_new_request,
+        handlers = {
+            "найти материал": self.materials,
+            "заказать материал": self.new_request,
             "создать задание с ии": lambda uid: self.start_ai(uid, "ai_task"),
             "план урока": lambda uid: self.start_ai(uid, "ai_lesson"),
-            "мои заявки": self.handle_my_requests,
-            "рассылка": self.handle_subscription,
+            "мои заявки": self.my_requests,
+            "рассылка": self.subscription,
             "подписаться": lambda uid: self.change_subscription(uid, True),
             "отписаться": lambda uid: self.change_subscription(uid, False),
-            "связаться с автором": self.handle_contact,
-            "администратор": self.handle_admin,
+            "связаться с автором": self.contact,
+            "администратор": self.admin,
         }
-        handler = commands.get(normalized)
+        handler = handlers.get(normalized)
         if handler:
             handler(user_id)
         else:
-            self.send(user_id, "Пожалуйста, выберите действие с помощью кнопок.", main_keyboard())
+            self.send(
+                user_id,
+                "Пожалуйста, выберите действие с помощью кнопок.",
+                main_keyboard(self.is_admin(user_id)),
+            )
 
-    def handle_materials(self, user_id: int) -> None:
-        materials = self.db.list_materials()
-        if not materials:
+    def materials(self, user_id: int) -> None:
+        rows = self.db.list_materials()
+        if not rows:
             self.send(
                 user_id,
                 "Каталог наполняется. Пока вы можете оставить заявку на нужный материал.",
                 back_keyboard(),
             )
             return
-        for item in materials:
-            description = f"{item['title']}\nУровень: {item['level']}\n{item['description']}"
-            self.send(user_id, description, attachment=item["file_attachment"])
-        self.send(user_id, "Это все доступные материалы.", back_keyboard())
-
-    def handle_new_request(self, user_id: int) -> None:
-        if not self.ai.available:
+        for item in rows:
             self.send(
                 user_id,
-                "ИИ для оформления заявок пока не подключён. Попробуйте позднее или свяжитесь с автором.",
-                back_keyboard(),
+                f"{item['title']}\nУровень: {item['level']}\n{item['description']}",
             )
+        self.send(user_id, "Это все доступные материалы.", back_keyboard())
+
+    def new_request(self, user_id: int) -> None:
+        if not self.ai.available:
+            self.send(user_id, "ИИ для заявок пока не подключён.", back_keyboard())
             return
-        self.request_interviews[user_id] = {"history": [], "questions": 0, "summary": ""}
+        self.interviews[user_id] = {"history": [], "questions": 0, "summary": ""}
         self.states[user_id] = "request_interview"
         self.send(
             user_id,
@@ -173,8 +135,8 @@ class TurkceBot:
             back_keyboard(),
         )
 
-    def continue_request_interview(self, user_id: int, text: str) -> None:
-        interview = self.request_interviews[user_id]
+    def continue_interview(self, user_id: int, text: str) -> None:
+        interview = self.interviews[user_id]
         interview["history"].append({"role": "user", "content": text.strip()})
         self.send(user_id, "Анализирую ответ…")
         try:
@@ -189,17 +151,15 @@ class TurkceBot:
                 back_keyboard(),
             )
             return
-
         if result["status"] == "question" and interview["questions"] < 3:
             question = result["message"]
             interview["history"].append({"role": "assistant", "content": question})
             interview["questions"] += 1
             self.send(user_id, question, back_keyboard())
             return
-
         summary = result.get("summary", "").strip()
         if not summary:
-            self.send(user_id, "ИИ не смог составить итог заявки. Попробуйте дополнить описание.", back_keyboard())
+            self.send(user_id, "ИИ не смог составить итог. Дополните описание.", back_keyboard())
             return
         interview["summary"] = summary
         self.states[user_id] = "request_confirmation"
@@ -208,6 +168,27 @@ class TurkceBot:
             f"Проверьте итог заявки:\n\n{summary}",
             request_confirmation_keyboard(),
         )
+
+    def confirm_request(self, user_id: int, action: str) -> None:
+        interview = self.interviews.get(user_id)
+        if not interview:
+            self.show_menu(user_id)
+        elif action == "подтвердить заявку":
+            request_id = self.db.add_request(user_id, interview["summary"])
+            self.interviews.pop(user_id, None)
+            self.states.pop(user_id, None)
+            self.send(
+                user_id,
+                f"Заявка №{request_id} принята. Я сообщу, когда её статус изменится.",
+                main_keyboard(self.is_admin(user_id)),
+            )
+        elif action == "изменить заявку":
+            self.states[user_id] = "request_interview"
+            self.send(user_id, "Напишите, что нужно изменить или добавить.", back_keyboard())
+        elif action == "отменить заявку":
+            self.show_menu(user_id)
+        else:
+            self.send(user_id, "Выберите действие с помощью кнопок.", request_confirmation_keyboard())
 
     def start_ai(self, user_id: int, state: str) -> None:
         self.states[user_id] = state
@@ -218,7 +199,7 @@ class TurkceBot:
         )
         self.send(user_id, prompt, back_keyboard())
 
-    def handle_my_requests(self, user_id: int) -> None:
+    def my_requests(self, user_id: int) -> None:
         rows = self.db.list_user_requests(user_id)
         if not rows:
             text = "У вас пока нет заявок."
@@ -230,7 +211,7 @@ class TurkceBot:
             )
         self.send(user_id, text, back_keyboard())
 
-    def handle_subscription(self, user_id: int) -> None:
+    def subscription(self, user_id: int) -> None:
         self.send(
             user_id,
             "Подпишитесь, чтобы получать новые материалы и новости проекта.",
@@ -240,38 +221,47 @@ class TurkceBot:
     def change_subscription(self, user_id: int, subscribed: bool) -> None:
         self.db.set_subscription(user_id, subscribed)
         text = "Вы подписаны на рассылку." if subscribed else "Вы отписались от рассылки."
-        self.send(user_id, text, main_keyboard(user_id == self.settings.admin_vk_id))
+        self.send(user_id, text, main_keyboard(self.is_admin(user_id)))
 
-    def handle_contact(self, user_id: int) -> None:
+    def contact(self, user_id: int) -> None:
         self.send(
             user_id,
-            "Напишите вопрос следующим сообщением. В первой версии сообщения можно также отправить администратору сообщества вручную.",
+            "Связаться с автором: https://vk.ru/turkcemateryaller",
             back_keyboard(),
         )
 
-    def handle_admin(self, user_id: int) -> None:
-        if user_id != self.settings.admin_vk_id:
+    def admin(self, user_id: int) -> None:
+        if not self.is_admin(user_id):
             self.show_menu(user_id)
             return
-        self.send(
-            user_id,
-            "Администраторский раздел подключён. Управление каталогом и рассылками добавим в следующем этапе.",
-            back_keyboard(),
-        )
+        self.send(user_id, "Администраторский раздел подключён.", back_keyboard())
 
-    def run(self) -> None:
-        logger.info("Bot started for group %s", self.settings.vk_group_id)
-        for event in self.longpoll.listen():
-            if event.type != VkBotEventType.MESSAGE_NEW:
-                continue
-            message = event.object.message
-            if message.get("peer_id") != message.get("from_id"):
+    def poll_once(self) -> None:
+        updates = self.call(
+            "getUpdates", offset=self.offset, timeout=25, allowed_updates=["message"]
+        )
+        for update in updates or []:
+            self.offset = max(self.offset, int(update["update_id"]) + 1)
+            message = update.get("message") or {}
+            chat = message.get("chat") or {}
+            sender = message.get("from") or {}
+            if chat.get("type") != "private" or "text" not in message:
                 continue
             try:
-                self.handle_message(int(message["from_id"]), message.get("text", ""))
+                self.handle(int(sender["id"]), str(message["text"]))
             except Exception:
                 logger.exception("Message handling failed")
 
+    def run(self) -> None:
+        identity = self.call("getMe")
+        logger.info("Telegram bot started: @%s", identity.get("username", "unknown"))
+        while True:
+            try:
+                self.poll_once()
+            except Exception:
+                logger.exception("Telegram polling failed")
+                time.sleep(5)
+
 
 if __name__ == "__main__":
-    TurkceBot().run()
+    TelegramBot().run()
