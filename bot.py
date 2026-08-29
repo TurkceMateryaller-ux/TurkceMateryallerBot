@@ -9,7 +9,12 @@ from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
 from ai_service import AIService
 from config import load_settings
 from database import Database
-from keyboards import back_keyboard, main_keyboard, subscription_keyboard
+from keyboards import (
+    back_keyboard,
+    main_keyboard,
+    request_confirmation_keyboard,
+    subscription_keyboard,
+)
 
 
 logging.basicConfig(
@@ -30,6 +35,7 @@ class TurkceBot:
         self.db.initialize()
         self.ai = AIService(self.settings.openai_api_key, self.settings.openai_model)
         self.states: dict[int, str] = {}
+        self.request_interviews: dict[int, dict] = {}
 
     def _log_vk_token_diagnostics(self) -> None:
         """Log non-secret token metadata before opening Long Poll."""
@@ -65,6 +71,7 @@ class TurkceBot:
 
     def show_menu(self, user_id: int) -> None:
         self.states.pop(user_id, None)
+        self.request_interviews.pop(user_id, None)
         self.send(
             user_id,
             "Выберите нужный раздел:",
@@ -80,14 +87,31 @@ class TurkceBot:
             return
 
         state = self.states.get(user_id)
-        if state == "new_request":
-            request_id = self.db.add_request(user_id, text)
-            self.states.pop(user_id, None)
-            self.send(
-                user_id,
-                f"Заявка №{request_id} принята. Я сообщу, когда её статус изменится.",
-                main_keyboard(user_id == self.settings.admin_vk_id),
-            )
+        if state == "request_interview":
+            self.continue_request_interview(user_id, text)
+            return
+        if state == "request_confirmation":
+            if normalized == "подтвердить заявку":
+                interview = self.request_interviews.pop(user_id)
+                request_id = self.db.add_request(user_id, interview["summary"])
+                self.states.pop(user_id, None)
+                self.send(
+                    user_id,
+                    f"Заявка №{request_id} принята. Я сообщу, когда её статус изменится.",
+                    main_keyboard(user_id == self.settings.admin_vk_id),
+                )
+            elif normalized == "изменить заявку":
+                self.states[user_id] = "request_interview"
+                self.send(
+                    user_id,
+                    "Напишите, что нужно изменить или добавить. ИИ обновит итог заявки.",
+                    back_keyboard(),
+                )
+            elif normalized == "отменить заявку":
+                self.request_interviews.pop(user_id, None)
+                self.show_menu(user_id)
+            else:
+                self.send(user_id, "Выберите: подтвердить, изменить или отменить заявку.", request_confirmation_keyboard())
             return
         if state in {"ai_task", "ai_lesson"}:
             kind = "упражнение с ответами" if state == "ai_task" else "план урока"
@@ -134,11 +158,55 @@ class TurkceBot:
         self.send(user_id, "Это все доступные материалы.", back_keyboard())
 
     def handle_new_request(self, user_id: int) -> None:
-        self.states[user_id] = "new_request"
+        if not self.ai.available:
+            self.send(
+                user_id,
+                "ИИ для оформления заявок пока не подключён. Попробуйте позднее или свяжитесь с автором.",
+                back_keyboard(),
+            )
+            return
+        self.request_interviews[user_id] = {"history": [], "questions": 0, "summary": ""}
+        self.states[user_id] = "request_interview"
         self.send(
             user_id,
-            "Опишите материал: тема, уровень A0-A2, возраст учеников, формат и пожелания.",
+            "Опишите, какой материал вы хотите получить. Можно написать свободно — ИИ уточнит только недостающие детали.",
             back_keyboard(),
+        )
+
+    def continue_request_interview(self, user_id: int, text: str) -> None:
+        interview = self.request_interviews[user_id]
+        interview["history"].append({"role": "user", "content": text.strip()})
+        self.send(user_id, "Анализирую ответ…")
+        try:
+            result = self.ai.continue_request_interview(
+                interview["history"], interview["questions"]
+            )
+        except Exception:
+            logger.exception("Request interview failed")
+            self.send(
+                user_id,
+                "Не удалось обратиться к ИИ. Ваш диалог не отправлен как заявка. Попробуйте ещё раз позднее.",
+                back_keyboard(),
+            )
+            return
+
+        if result["status"] == "question" and interview["questions"] < 3:
+            question = result["message"]
+            interview["history"].append({"role": "assistant", "content": question})
+            interview["questions"] += 1
+            self.send(user_id, question, back_keyboard())
+            return
+
+        summary = result.get("summary", "").strip()
+        if not summary:
+            self.send(user_id, "ИИ не смог составить итог заявки. Попробуйте дополнить описание.", back_keyboard())
+            return
+        interview["summary"] = summary
+        self.states[user_id] = "request_confirmation"
+        self.send(
+            user_id,
+            f"Проверьте итог заявки:\n\n{summary}",
+            request_confirmation_keyboard(),
         )
 
     def start_ai(self, user_id: int, state: str) -> None:
