@@ -20,10 +20,10 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    token = os.getenv("VK_GROUP_TOKEN", "").strip()
+    token = (os.getenv("VK_GROUP_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
     admin_id = os.getenv("ADMIN_VK_ID", "").strip()
     if not token:
-        raise RuntimeError("VK_GROUP_TOKEN is not configured")
+        raise RuntimeError("VK_GROUP_TOKEN or BOT_TOKEN is not configured")
     if not admin_id.isdigit():
         raise RuntimeError("ADMIN_VK_ID must be a numeric VK user id")
 
@@ -35,4 +35,3 @@ def load_settings() -> Settings:
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
         database_path=os.getenv("DATABASE_PATH", "data/bot.db"),
     )
-
