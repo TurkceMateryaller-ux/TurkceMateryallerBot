@@ -1,46 +1,32 @@
 from __future__ import annotations
 
-from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+
+def _keyboard(rows: list[list[str]]) -> dict:
+    return {"keyboard": rows, "resize_keyboard": True, "is_persistent": True}
 
 
-def main_keyboard(is_admin: bool = False) -> VkKeyboard:
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button("Найти материал", VkKeyboardColor.PRIMARY)
-    keyboard.add_button("Заказать материал", VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button("Создать задание с ИИ", VkKeyboardColor.POSITIVE)
-    keyboard.add_button("План урока", VkKeyboardColor.POSITIVE)
-    keyboard.add_line()
-    keyboard.add_button("Мои заявки", VkKeyboardColor.SECONDARY)
-    keyboard.add_button("Рассылка", VkKeyboardColor.SECONDARY)
-    keyboard.add_line()
-    keyboard.add_button("Связаться с автором", VkKeyboardColor.SECONDARY)
+def main_keyboard(is_admin: bool = False) -> dict:
+    rows = [
+        ["Найти материал", "Заказать материал"],
+        ["Создать задание с ИИ", "План урока"],
+        ["Мои заявки", "Рассылка"],
+        ["Связаться с автором"],
+    ]
     if is_admin:
-        keyboard.add_line()
-        keyboard.add_button("Администратор", VkKeyboardColor.NEGATIVE)
-    return keyboard
+        rows.append(["Администратор"])
+    return _keyboard(rows)
 
 
-def back_keyboard() -> VkKeyboard:
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button("В главное меню", VkKeyboardColor.SECONDARY)
-    return keyboard
+def back_keyboard() -> dict:
+    return _keyboard([["В главное меню"]])
 
 
-def subscription_keyboard() -> VkKeyboard:
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button("Подписаться", VkKeyboardColor.POSITIVE)
-    keyboard.add_button("Отписаться", VkKeyboardColor.NEGATIVE)
-    keyboard.add_line()
-    keyboard.add_button("В главное меню", VkKeyboardColor.SECONDARY)
-    return keyboard
+def subscription_keyboard() -> dict:
+    return _keyboard([["Подписаться", "Отписаться"], ["В главное меню"]])
 
 
-def request_confirmation_keyboard() -> VkKeyboard:
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button("Подтвердить заявку", VkKeyboardColor.POSITIVE)
-    keyboard.add_button("Изменить заявку", VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button("Отменить заявку", VkKeyboardColor.NEGATIVE)
-    keyboard.add_button("В главное меню", VkKeyboardColor.SECONDARY)
-    return keyboard
+def request_confirmation_keyboard() -> dict:
+    return _keyboard([
+        ["Подтвердить заявку", "Изменить заявку"],
+        ["Отменить заявку", "В главное меню"],
+    ])
