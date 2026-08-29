@@ -20,14 +20,66 @@ class AIService:
     def available(self) -> bool:
         return bool(self.api_key)
 
+    def _available_models(self) -> list[str]:
+        """Return text models that this API key can actually use."""
+        response = requests.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": self.api_key},
+            params={"pageSize": 1000},
+            timeout=30,
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"Gemini models.list failed ({response.status_code}): "
+                f"{response.text[:500]}"
+            )
+
+        models: list[str] = []
+        for item in response.json().get("models", []):
+            name = str(item.get("name", "")).removeprefix("models/")
+            methods = item.get("supportedGenerationMethods", [])
+            lowered = name.lower()
+            if (
+                name
+                and "generateContent" in methods
+                and "gemini" in lowered
+                and all(
+                    marker not in lowered
+                    for marker in ("image", "live", "audio", "tts", "embedding")
+                )
+            ):
+                models.append(name)
+
+        def priority(name: str) -> tuple[int, str]:
+            lowered = name.lower()
+            if "flash-lite" in lowered and "preview" not in lowered:
+                return (0, name)
+            if "flash" in lowered and "preview" not in lowered:
+                return (1, name)
+            if "flash-lite" in lowered:
+                return (2, name)
+            if "flash" in lowered:
+                return (3, name)
+            return (4, name)
+
+        return sorted(set(models), key=priority)
+
+    def _post_generate(self, model: str, body: dict) -> requests.Response:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent"
+        )
+        return requests.post(
+            url,
+            headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+            json=body,
+            timeout=45,
+        )
+
     def _generate(self, prompt: str, *, json_mode: bool = False) -> str:
         if not self.api_key:
             raise RuntimeError("Gemini API is not configured")
 
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:generateContent"
-        )
         body: dict = {
             "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -36,13 +88,18 @@ class AIService:
         if json_mode:
             body["generationConfig"]["responseMimeType"] = "application/json"
 
-        response = requests.post(
-            url,
-            headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
-            json=body,
-            timeout=45,
-        )
-        response.raise_for_status()
+        response = self._post_generate(self.model, body)
+        if response.status_code == 404:
+            available_models = self._available_models()
+            if not available_models:
+                raise RuntimeError("Gemini did not return any usable text models")
+            self.model = available_models[0]
+            response = self._post_generate(self.model, body)
+        if not response.ok:
+            raise RuntimeError(
+                f"Gemini request failed ({response.status_code}, model={self.model}): "
+                f"{response.text[:500]}"
+            )
         data = response.json()
         try:
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
