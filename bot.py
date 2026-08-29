@@ -24,11 +24,32 @@ class TurkceBot:
         self.settings = load_settings()
         self.session = vk_api.VkApi(token=self.settings.vk_group_token)
         self.api = self.session.get_api()
+        self._log_vk_token_diagnostics()
         self.longpoll = VkBotLongPoll(self.session, self.settings.vk_group_id)
         self.db = Database(self.settings.database_path)
         self.db.initialize()
         self.ai = AIService(self.settings.openai_api_key, self.settings.openai_model)
         self.states: dict[int, str] = {}
+
+    def _log_vk_token_diagnostics(self) -> None:
+        """Log non-secret token metadata before opening Long Poll."""
+        try:
+            result = self.api.groups.getTokenPermissions()
+            permissions = [
+                item.get("name", "unknown")
+                for item in result.get("permissions", [])
+                if isinstance(item, dict)
+            ]
+            logger.info("VK token permissions: %s", ", ".join(permissions) or "none")
+        except Exception:
+            logger.exception("Could not inspect VK token permissions")
+
+        try:
+            groups = self.api.groups.getById(group_id=self.settings.vk_group_id)
+            resolved = groups.get("groups", groups) if isinstance(groups, dict) else groups
+            logger.info("VK token group check: configured=%s resolved=%s", self.settings.vk_group_id, resolved)
+        except Exception:
+            logger.exception("Could not verify VK group for token")
 
     def send(self, user_id: int, text: str, keyboard=None, attachment: str | None = None) -> None:
         params = {
@@ -186,4 +207,3 @@ class TurkceBot:
 
 if __name__ == "__main__":
     TurkceBot().run()
-
