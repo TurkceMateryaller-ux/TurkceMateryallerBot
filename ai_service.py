@@ -2,45 +2,63 @@ from __future__ import annotations
 
 import json
 
-from openai import OpenAI
+import requests
 
 
 SYSTEM_PROMPT = """Ты методический помощник преподавателей турецкого языка.
 Работай только с уровнями A0-A2. Пиши по-русски, а примеры давай на корректном
-турецком языке. Не выдумывай источники, готовые файлы, цены или наличие
-материалов. Учитывай возраст учеников и всегда добавляй ключ ответов, если
-пользователь просит упражнение."""
+турецком языке. Не выдумывай источники, готовые файлы, цены, сроки или наличие
+материалов. Не запрашивай и не включай в ответы персональные данные учеников."""
 
 
 class AIService:
     def __init__(self, api_key: str | None, model: str):
-        self.client = OpenAI(api_key=api_key) if api_key else None
+        self.api_key = api_key
         self.model = model
 
     @property
     def available(self) -> bool:
-        return self.client is not None
+        return bool(self.api_key)
+
+    def _generate(self, prompt: str, *, json_mode: bool = False) -> str:
+        if not self.api_key:
+            raise RuntimeError("Gemini API is not configured")
+
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self.model}:generateContent"
+        )
+        body: dict = {
+            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2},
+        }
+        if json_mode:
+            body["generationConfig"]["responseMimeType"] = "application/json"
+
+        response = requests.post(
+            url,
+            headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+            json=body,
+            timeout=45,
+        )
+        response.raise_for_status()
+        data = response.json()
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError, TypeError) as error:
+            raise RuntimeError("Gemini returned an unexpected response") from error
 
     def generate(self, request: str, kind: str) -> str:
-        if not self.client:
-            return (
-                "ИИ пока не подключён. Ваш запрос сохранён в диалоге; "
-                "после добавления OPENAI_API_KEY функция станет доступна."
-            )
-        instructions = SYSTEM_PROMPT + f"\nТип результата: {kind}."
-        response = self.client.responses.create(
-            model=self.model,
-            instructions=instructions,
-            input=request,
+        prompt = (
+            f"Создай {kind} по запросу преподавателя. Учитывай уровень A0-A2, "
+            f"возраст и цель урока. Запрос: {request}"
         )
-        return response.output_text.strip()
+        return self._generate(prompt)
 
     def continue_request_interview(
         self, history: list[dict[str, str]], questions_asked: int
     ) -> dict[str, str]:
-        if not self.client:
-            return {"status": "unavailable", "message": "ИИ пока не подключён."}
-
         prompt = f"""Проведи короткое интервью для заявки на учебный материал.
 Целевая аудитория сервиса: преподаватели турецкого языка, уровни A0-A2.
 Проанализируй весь диалог и реши, достаточно ли данных для технического задания.
@@ -61,22 +79,13 @@ class AIService:
 Диалог:
 {json.dumps(history, ensure_ascii=False)}
 """
-        response = self.client.responses.create(
-            model=self.model,
-            instructions=SYSTEM_PROMPT,
-            input=prompt,
-        )
-        raw = response.output_text.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            if raw.startswith("json"):
-                raw = raw[4:].lstrip()
+        raw = self._generate(prompt, json_mode=True)
         try:
             result = json.loads(raw)
         except json.JSONDecodeError as error:
-            raise RuntimeError("AI returned invalid interview JSON") from error
+            raise RuntimeError("Gemini returned invalid interview JSON") from error
         if result.get("status") == "question" and result.get("message"):
             return {"status": "question", "message": str(result["message"]).strip()}
         if result.get("status") == "ready" and result.get("summary"):
             return {"status": "ready", "summary": str(result["summary"]).strip()}
-        raise RuntimeError("AI returned an unsupported interview result")
+        raise RuntimeError("Gemini returned an unsupported interview result")
