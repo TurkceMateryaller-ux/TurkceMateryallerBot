@@ -35,3 +35,12 @@ def subscription_keyboard() -> VkKeyboard:
     keyboard.add_button("В главное меню", VkKeyboardColor.SECONDARY)
     return keyboard
 
+
+def request_confirmation_keyboard() -> VkKeyboard:
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button("Подтвердить заявку", VkKeyboardColor.POSITIVE)
+    keyboard.add_button("Изменить заявку", VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button("Отменить заявку", VkKeyboardColor.NEGATIVE)
+    keyboard.add_button("В главное меню", VkKeyboardColor.SECONDARY)
+    return keyboard
