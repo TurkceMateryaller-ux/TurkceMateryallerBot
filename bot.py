@@ -33,7 +33,7 @@ class TurkceBot:
         self.longpoll = VkBotLongPoll(self.session, self.settings.vk_group_id)
         self.db = Database(self.settings.database_path)
         self.db.initialize()
-        self.ai = AIService(self.settings.openai_api_key, self.settings.openai_model)
+        self.ai = AIService(self.settings.gemini_api_key, self.settings.gemini_model)
         self.states: dict[int, str] = {}
         self.request_interviews: dict[int, dict] = {}
 
